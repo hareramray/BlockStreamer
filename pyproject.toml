@@ -7,6 +7,7 @@ name = "block-streamer"
 version = "0.1.0"
 description = "Bounded, asynchronous parameter streaming for PyTorch blocks"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = ["torch>=2.4"]
 

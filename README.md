@@ -1,5 +1,7 @@
 # BlockStreamer
 
+Licensed under the [Apache License 2.0](LICENSE).
+
 Execute ordered PyTorch blocks with pinned CPU master weights, asynchronous CUDA
 prefetch, and at most `prefetch_ahead + 1` resident blocks. Includes inference,
 first-order training with backward re-fetch, correctness tests, and a measured
