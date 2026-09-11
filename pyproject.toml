@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "block-streamer"
+version = "0.1.0"
+description = "Bounded, asynchronous parameter streaming for PyTorch blocks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["torch>=2.4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.9", "matplotlib>=3.8"]
+
+[tool.setuptools]
+packages = ["block_streamer"]
+py-modules = ["streamer", "memory_pool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["cuda: requires an NVIDIA CUDA device"]
+
+[tool.ruff]
+line-length = 88
