@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,9 +7,21 @@ name = "block-streamer"
 version = "0.1.0"
 description = "Bounded, asynchronous parameter streaming for PyTorch blocks"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["torch>=2.4"]
+keywords = ["pytorch", "cuda", "offloading", "inference", "training"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/hareramray/BlockStreamer"
+Issues = "https://github.com/hareramray/BlockStreamer/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.9", "matplotlib>=3.8"]

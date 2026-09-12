@@ -1,6 +1,6 @@
 # BlockStreamer
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License 2.0](https://github.com/hareramray/BlockStreamer/blob/main/LICENSE).
 
 Execute ordered PyTorch blocks with pinned CPU master weights, asynchronous CUDA
 prefetch, and at most `prefetch_ahead + 1` resident blocks. Includes inference,
@@ -41,7 +41,13 @@ Ordinary dropout is supported through RNG replay during recomputation.
 ## Install and run
 
 Requires Python 3.11+, PyTorch 2.4+, and a CUDA GPU. Install a CUDA-enabled PyTorch
-wheel suitable for your GPU first, then:
+wheel suitable for your GPU first. For the published package:
+
+```bash
+python -m pip install block-streamer
+```
+
+For development, clone the repository and install from its root:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -189,14 +195,14 @@ saved tensors are version-checked; edits through `.data` bypass PyTorch's protec
 
 ## Measured crossover and memory
 
-![Measured transfer/compute crossover and peak CUDA allocation](results/roofline.png)
+![Measured transfer/compute crossover and peak CUDA allocation](https://raw.githubusercontent.com/hareramray/BlockStreamer/main/results/roofline.png)
 
 Local measurement: NVIDIA GeForce RTX 5050 Laptop GPU (8 GB), Windows WDDM,
 PyTorch 2.11.0+cu128 / CUDA runtime 12.8, bf16, six heterogeneous MLP blocks,
 `prefetch_ahead=1`, four warmups and ten timed runs. These are measurements on this
 machine, not predictions for a desktop PCIe Gen4 x16 link. The benchmark records
 31.5 GB/s as the nominal Gen4 x16 reference but uses **measured pinned H2D time**
-for its conclusions. See [the complete report](results/benchmark.json).
+for its conclusions. See [the complete report](https://github.com/hareramray/BlockStreamer/blob/main/results/benchmark.json).
 
 **Headline:** at 32 and 2,048 tokens, the sampled compute/H2D crossover falls
 between widths 128 and 256. At 8,192 tokens, compute time exceeds H2D time at every

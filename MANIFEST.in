@@ -1,0 +1,4 @@
+include LICENSE README.md benchmark.py
+include results/benchmark.json results/roofline.png
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]
