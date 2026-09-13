@@ -2,10 +2,15 @@
 
 Licensed under the [Apache License 2.0](https://github.com/hareramray/BlockStreamer/blob/main/LICENSE).
 
-Execute ordered PyTorch blocks with pinned CPU master weights, asynchronous CUDA
-prefetch, and at most `prefetch_ahead + 1` resident blocks. Includes inference,
-first-order training with backward re-fetch, correctness tests, and a measured
-transfer/compute crossover benchmark.
+Execute ordered PyTorch blocks with master weights in pinned CPU memory **or on
+NVMe**, asynchronous CUDA prefetch, and at most `prefetch_ahead + 1` resident
+blocks. Includes inference, first-order training with backward re-fetch, LoRA
+finetuning of models far larger than host RAM, a fused per-block optimizer,
+correctness tests, and a measured transfer/compute crossover benchmark.
+
+Three models have been LoRA-finetuned end to end on a single 8 GB laptop GPU:
+Qwen3-VL-8B, Qwen3-VL-32B, and gpt-oss-120b. See
+[NVMe offload and LoRA finetuning](#nvme-offload-and-lora-finetuning).
 
 ## Prior art and binding decision
 
@@ -13,8 +18,11 @@ Accelerate's `cpu_offload_with_hook` leaves a module on the execution device unt
 its offload hook runs; BlockStreamer instead schedules an explicit bounded window
 of individual blocks and transfer-ready events.
 [Accelerate documentation](https://huggingface.co/docs/accelerate/en/package_reference/big_modeling#accelerate.cpu_offload_with_hook)
-ZeRO-Infinity is a broader training system that spans GPU, CPU, and NVMe memory;
-this project targets one GPU, CPU parameter storage, and an ordered block list.
+ZeRO-Infinity is a broader training system that spans GPU, CPU, and NVMe memory
+across many devices. BlockStreamer now spans the same three tiers, but for one GPU
+and an ordered block list, with no sharding, collectives, or partitioning: the unit
+of movement is a block, not a shard, and the residency bound is a block count the
+caller sets.
 [ZeRO-Infinity paper](https://arxiv.org/abs/2104.07857)
 FSDP `CPUOffload` moves parameters and gradients to CPU within FSDP's sharding and
 distributed training machinery; this library has no distributed collectives or
@@ -25,7 +33,8 @@ less general model execution and substantial Python/event overhead for tiny bloc
 
 **Binding mechanism: `torch.func.functional_call`.** Each block executes with a
 dictionary of its staged GPU parameters and buffers, with strict key checking and
-PyTorch's tied-weight handling. Registered parameters stay on pinned CPU storage.
+PyTorch's tied-weight handling. Registered parameters stay on pinned CPU storage,
+or on `meta` when a shard manifest supplies them from disk.
 Construction and `.to()` replace CPU storage to pin/convert it while preserving
 `Parameter` identity; `.data` is never used to bind staged GPU weights for compute.
 [Functional-call documentation](https://docs.pytorch.org/docs/stable/generated/torch.func.functional_call.html)
@@ -45,6 +54,15 @@ wheel suitable for your GPU first. For the published package:
 
 ```bash
 python -m pip install block-streamer
+```
+
+`torch` is the only hard dependency. The streaming core, LoRA, and the fused
+optimizer need nothing else. `planner.py`, `runners.py`, and `gptoss.py` read real
+Hugging Face checkpoints and additionally need `transformers` and `safetensors`;
+they import these lazily, so the rest of the package works without them:
+
+```bash
+python -m pip install transformers safetensors
 ```
 
 For development, clone the repository and install from its root:
@@ -154,17 +172,25 @@ The training design makes these choices:
    O(all blocks) parameter VRAM. Instead, save block inputs on GPU, discard staged
    weights, and re-fetch/recompute one block at a time during backward. A training
    step transfers each block's state twice and performs an extra forward compute.
-   Saved activations remain O(depth); activation offloading is outside this project.
+   Backward stops at the lowest block holding a trainable parameter, so adapting
+   only the top layers halves the re-fetch rather than merely discarding the
+   gradients. Saved activations are O(depth) on GPU by default;
+   `microbatch.py` offloads them to pinned host memory when depth makes that
+   impossible.
 2. **Offload gradients after each block.** Compute that block's gradients on GPU,
    copy them into pinned CPU tensors on the compute stream, and make CPU reads wait
    for the completion event. Return CPU parameter gradients through autograd so
    normal `.grad` accumulation works. Peak GPU memory also includes one block's
    gradients and recomputation graph, plus saved activations and input gradients.
    Shared parameters' CPU gradient contributions are summed after copies finish.
-3. **CPU optimizer and state.** Use an ordinary CPU optimizer on `model.parameters()`.
-   The optimizer step runs on CPU and does not stream to GPU. This incurs host RAM
-   for all gradients/optimizer state. No automatic fp32 master-weight conversion,
-   fused offloaded optimizer, or integrated loss scaling is provided.
+3. **CPU optimizer and state, by default.** An ordinary CPU optimizer on
+   `model.parameters()` runs its step on CPU and does not stream to GPU. This
+   incurs host RAM for every gradient and every moment, which is what caps this
+   path near 1B parameters on a 16 GB host. `fused_optim.FusedDiskAdam` lifts
+   that cap by consuming each block's gradients during backward; see
+   [NVMe offload and LoRA finetuning](#nvme-offload-and-lora-finetuning).
+   No automatic fp32 master-weight conversion or integrated loss scaling is
+   provided.
 4. **Custom `torch.autograd.Function`.** It owns the forward/backward schedule,
    saves version-checked master state and block inputs, then visits blocks in
    reverse with the same bounded prefetch window. Block N-1 is fetched ahead of
@@ -210,6 +236,20 @@ raise the ceiling:
   every step, which exhausts a 300 TBW consumer SSD in a few hundred steps for
   any model above ~8B, so `planner.py` gates it behind an explicit check.
 
+Per-parameter cost and the resulting ceiling, for bf16 compute with Adam on a
+16 GB host and ~330 GB of free disk:
+
+| mode | RAM B/param | disk B/param | writes/step | max params |
+| --- | ---: | ---: | ---: | ---: |
+| all pinned RAM (the original path) | 8 | 0 | 0 | ~1.0B |
+| weights to disk only | 6 | 2 | 0 | ~1.3B |
+| full finetune, fused step, fp32 Adam | ~0 | 14 | 12 | ~21B |
+| full finetune, fused step, 8-bit Adam | ~0 | 8 | 6 | ~37B |
+| **LoRA, frozen base** | ~0 | 2 | 0 | **~150B** |
+
+The last row is why LoRA is the default. Writing nothing per step removes both the
+endurance limit and two thirds of the per-step traffic.
+
 Start with `planner.py`, which reads a checkpoint's real safetensors headers and
 reports capacity, throughput, and endurance before anything is downloaded:
 
@@ -219,7 +259,44 @@ python planner.py --models gpt-oss-120b Qwen3-VL-32B
 
 It computes sizes from tensor shapes, never from an index's `metadata.total_size`
 -- several published indexes report a parameter count there rather than a byte
-count, which understates a BF16 checkpoint by 2x.
+count, which understates a BF16 checkpoint by 2x. Verdicts are `RAM` (the existing
+pinned path already fits, so none of this is needed), `LORA_DISK`, `FULL_FT_DISK`,
+or `INFEASIBLE`, with a reason for each rejection: too large for free disk, too
+large for VRAM even after sub-splitting layers, or too few steps before the drive's
+rated write endurance is exhausted.
+
+### End to end
+
+```python
+import torch
+from lora import LoRAConfig
+from runners import Qwen3VLRunner
+
+# Converts the checkpoint to per-block shards on first use, then streams them.
+runner = Qwen3VLRunner(
+    "models/Qwen3-VL-8B",
+    "models/shards-qwen8b",
+    LoRAConfig(rank=8, alpha=16, top_fraction=0.5),
+    prefetch_ahead=2,
+    dtype=torch.bfloat16,
+).train()
+
+optimizer = torch.optim.AdamW(runner.trainable_parameters(), lr=2e-4)
+logits = runner(input_ids)
+loss = torch.nn.functional.cross_entropy(
+    logits[:, :-1].reshape(-1, logits.shape[-1]).float(), input_ids[:, 1:].reshape(-1)
+)
+loss.backward()
+optimizer.step()
+```
+
+`.train()` matters: `StreamedModel` constructs in `eval()`, and the inference path
+runs under `no_grad`, so a forward taken in eval mode produces a loss with no
+`grad_fn`. `top_fraction=0.5` puts adapters on the top half of the decoder, which
+halves the backward re-fetch because the walk stops at the lowest trainable block.
+
+`train_qwen8b.py`, `train_qwen32b.py`, and `train_gptoss.py` are the exact scripts
+used for the runs below.
 
 ### Measured results
 
@@ -235,7 +312,32 @@ sequence length 128:
 
 These runs overfit a single fixed token sequence. They demonstrate that gradients
 flow correctly through the streaming machinery end to end; they are **not** useful
-finetunes on real data.
+finetunes on real data. Qwen3-VL-32B was still descending steeply at step 30, with
+10M adapter parameters against Qwen3-VL-8B's 3.8M.
+
+Effective throughput was 1.47, 1.15, and 1.00 GB/s respectively. At least three
+effects are mixed into that spread and three measurements cannot separate them:
+page cache (12.9 GiB partly fits in 15.7 GB of RAM, 58 GiB does not),
+per-block overhead (Qwen3-VL-32B makes 96 block visits per step against
+gpt-oss's 54, so its smaller blocks cost more per byte), and MXFP4 dequantization
+compute in gpt-oss. `planner.py` therefore assumes a flat, deliberately
+conservative 1.0 GB/s rather than fitting a curve to three points; it predicts
+21/94/94 s against the 14.2/82.3/94.1 measured, erring toward over-estimating.
+
+### MXFP4 and the backward pass
+
+gpt-oss ships its experts packed: one layer is 1.63 GiB of `uint8` blocks and
+scales. Upcasting the checkpoint to bf16 would take it from 61 GiB to roughly
+230 GiB, and dequantizing a single *layer* yields 5.93 GiB of dense experts, which
+does not fit beside anything else on an 8 GB card. So the packed tensors stream
+verbatim and each expert is dequantized inside the routing loop, 47 MiB at a time.
+
+That is sufficient for forward and insufficient for backward. Autograd needs the
+dense weight to compute `dL/dx`, so it retains every expert it touched -- about
+6 GiB per layer -- and recompute runs out of memory even though forward fit.
+`gptoss._MXFP4Matmul` saves only the packed tensors, which are the block's staged
+state and therefore free, and re-derives the dense weight in backward. Gradients
+are bit-identical to the dense path.
 
 ### Components
 
@@ -266,11 +368,27 @@ model = StreamedModel(meta_blocks, prefetch_ahead=2, manifest=manifest)
 
 Sequence length 128 was used throughout; gpt-oss's 128-token sliding-window
 attention coincides with full attention there, and longer sequences need real
-sliding-window masks passed as block kwargs, which is not implemented. The fused
-optimizer is correctness-tested against `torch.optim.Adam` at small scale only --
-the planner rejects every full-finetune target on this hardware. Qwen3-VL-MoE
-stores experts fused in one tensor per layer, so it needs expert-dimension
-slicing (`adapters.chunk_fused_experts`) rather than name-based splitting.
+sliding-window masks passed as block kwargs, which is not implemented.
+
+The runs are text-only, and stricter than that: `Qwen3VLRunner` takes
+`with_vision=False` by default and the scripts leave it there, so the vision tower
+was never even loaded. The 2.32 GiB of resident state measured for Qwen3-VL-8B is
+embeddings, final norm, and `lm_head` alone. Passing `with_vision=True` loads and
+freezes the tower, but nothing here has fed it an image, so the whole image path
+is unexercised despite two of the three models being VLMs.
+
+The fused optimizer is correctness-tested against `torch.optim.Adam` at small
+scale only, because the planner rejects every full-finetune target on this
+hardware on endurance grounds. Micro-batch looping and activation offload
+(`microbatch.py`) are tested for gradient equivalence and byte-identical reads but
+were not used in the runs above, which are batch 1.
+
+Only Qwen3-VL and gpt-oss have runners. `adapters.py` carries a GLM-4.x adapter
+validated against a real manifest for block assignment and sizing, but no GLM
+model was downloaded or run. Qwen3-VL-MoE stores experts fused in one tensor per
+layer, so it needs expert-dimension slicing (`adapters.chunk_fused_experts`)
+rather than name-based splitting; that slicing is unit-tested but never exercised
+against a real MoE checkpoint, since Qwen3-VL-235B needs 439 GiB and does not fit.
 
 ## Measured crossover and memory
 
@@ -335,7 +453,7 @@ visually verified here**. CUDA-event timing, real GPU parity tests, and memory
 measurements did run. Re-run on a compatible CUPTI/driver setup to capture GPU
 kernels and copies; `--no-trace` explicitly skips profiler collection.
 
-The final local suite passed **32 tests** on CUDA, with Ruff lint/format checks
+The final local suite passed **55 tests** on CUDA, with Ruff lint/format checks
 also passing. Tests cover inference in fp32/bf16/fp16 at prefetch depths 0–3,
 heterogeneous blocks and nonpersistent buffers, extra arguments and tuple results,
 every residency transition, a 100-iteration bandwidth-starved allocator stress,
@@ -344,6 +462,16 @@ and over-budget errors, and exception cleanup. Training tests cover fp32/bf16/fp
 gradient parity at depths 1–3, CPU pinned gradients, extra-input gradients, dropout
 RNG replay, unused/shared parameters, accumulation, autocast with frozen weights,
 CPU Adam state placement, and a 12-step SGD toy loss curve.
+
+The offload tests add bit-exact shard round-trips across mixed dtypes, disk-backed
+inference parity and the residency bound at prefetch depths 0–5, a 100-iteration
+deep-prefetch stress, proof that the pinned ring is the only large pinned
+allocation and every base parameter stays on `meta`, fused-optimizer parity
+against `torch.optim.Adam` over 20 steps, projected-wear accounting, LoRA identity
+at initialization, the absence of gradients on any non-adapter parameter, a LoRA
+loss curve, micro-batch gradient equivalence with byte-identical reads at N = 1,
+2 and 4, expert-major visiting order, fused-expert slicing, and the MXFP4
+gradient/memory check described above.
 
 Inference `atol=rtol` is `1e-5` for fp32, `8e-3` for bf16, and `1e-3` for fp16,
 allowing roughly one low-precision rounding unit at unit scale. Backward
