@@ -20,12 +20,18 @@ def module_state(module: nn.Module) -> dict[str, Tensor]:
     return dict(list(module.named_parameters()) + list(module.named_buffers()))
 
 
-def pin_modules(blocks: nn.ModuleList, dtype: torch.dtype | None) -> None:
+def pin_modules(
+    blocks: nn.ModuleList, dtype: torch.dtype | None, skip_meta: bool = False
+) -> None:
     """Preserve Parameter identity and shared objects when creating CPU storage."""
     if dtype is not None and not dtype.is_floating_point:
         raise TypeError("dtype must be a floating-point torch.dtype")
     storage_owners: dict[tuple[torch.device, int], int] = {}
     tensors = list(blocks.parameters()) + list(blocks.buffers())
+    if skip_meta:
+        # Disk-backed blocks are constructed on meta: their master weights live
+        # in shard files, so there is nothing to pin. Only adapters are real.
+        tensors = [tensor for tensor in tensors if not tensor.is_meta]
     for tensor in tensors:
         if tensor.is_meta or tensor.layout != torch.strided:
             raise ValueError("Only materialized, dense strided state is supported")

@@ -38,6 +38,7 @@ class StreamedModel(nn.Module):
         dtype: torch.dtype | None = None,
         buffer_budget_bytes: int | None = None,
         residency_observer: Callable[[int], None] | None = None,
+        manifest: Any = None,
     ) -> None:
         super().__init__()
         if isinstance(prefetch_ahead, bool) or not isinstance(prefetch_ahead, int):
@@ -55,7 +56,11 @@ class StreamedModel(nn.Module):
         self._busy = False
         self._configuration_version = 0
         self.gradient_transfer_bytes = 0
-        pin_modules(self.blocks, dtype)
+        self.manifest = manifest
+        if manifest is None:
+            pin_modules(self.blocks, dtype)
+        else:
+            pin_modules(self.blocks, dtype, skip_meta=True)
         self._make_engine()
         self.eval()
 
@@ -78,14 +83,27 @@ class StreamedModel(nn.Module):
         # create a persistent cuBLAS workspace per instance in PyTorch's handle pool.
         self.compute_stream = torch.cuda.current_stream(device=self.device)
         self.transfer_stream = torch.cuda.Stream(device=self.device)
-        self.pool = BufferPool(
-            self.device,
-            self.prefetch_ahead + 1,
-            self.transfer_stream,
-            self.compute_stream,
-            self.buffer_budget_bytes,
-            self.residency_observer,
-        )
+        if self.manifest is None:
+            self.pool = BufferPool(
+                self.device,
+                self.prefetch_ahead + 1,
+                self.transfer_stream,
+                self.compute_stream,
+                self.buffer_budget_bytes,
+                self.residency_observer,
+            )
+        else:
+            from diskpool import DiskBufferPool
+
+            self.pool = DiskBufferPool(
+                self.device,
+                self.prefetch_ahead + 1,
+                self.transfer_stream,
+                self.compute_stream,
+                self.manifest,
+                self.buffer_budget_bytes,
+                self.residency_observer,
+            )
 
     def _execute(
         self,

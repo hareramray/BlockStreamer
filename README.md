@@ -193,6 +193,85 @@ must not modify block inputs in place, change execution behavior between forward
 and backward, or retain GPU weights in external state. Normal in-place changes to
 saved tensors are version-checked; edits through `.data` bypass PyTorch's protection.
 
+## NVMe offload and LoRA finetuning
+
+Keeping master weights in pinned host RAM caps the model near 1B parameters on a
+16 GB machine: weights, gradients, and Adam state together cost about 8 bytes per
+parameter. Moving only the **weights** to disk barely helps, because gradients and
+optimizer state still sit in RAM (about 6 B/param, so ~1.3x). Two things actually
+raise the ceiling:
+
+* **LoRA over a streamed, frozen base.** The base is read-only, so there is no
+  optimizer state and nothing is written back. Disk holds 2 B/param and SSD
+  endurance is a non-issue.
+* **A fused per-block optimizer** (`fused_optim.py`) that reads a block's moments,
+  updates on GPU, writes back, and discards the gradient before the next block.
+  Host memory then holds one block rather than the model. It writes 12 B/param
+  every step, which exhausts a 300 TBW consumer SSD in a few hundred steps for
+  any model above ~8B, so `planner.py` gates it behind an explicit check.
+
+Start with `planner.py`, which reads a checkpoint's real safetensors headers and
+reports capacity, throughput, and endurance before anything is downloaded:
+
+```bash
+python planner.py --models gpt-oss-120b Qwen3-VL-32B
+```
+
+It computes sizes from tensor shapes, never from an index's `metadata.total_size`
+-- several published indexes report a parameter count there rather than a byte
+count, which understates a BF16 checkpoint by 2x.
+
+### Measured results
+
+Three models LoRA-finetuned end to end on one RTX 5050 Laptop (8 GB VRAM,
+15.7 GB RAM, consumer NVMe), bf16, rank 8, adapters on the top half of layers,
+sequence length 128:
+
+| model | streamed | blocks | peak VRAM | median s/step | loss |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Qwen3-VL-8B | 12.94 GiB | 36 x 368 MiB | 3.52 GiB | 14.2 | 13.14 -> 0.33 (60 steps) |
+| gpt-oss-120b | 58.61 GiB | 36 x 1.63 GiB | 5.69 GiB | 82.3 | 13.69 -> 0.40 (30 steps) |
+| Qwen3-VL-32B | 58.13 GiB | 64 x 0.91 GiB | 5.83 GiB | 94.1 | 13.45 -> 4.83 (30 steps) |
+
+These runs overfit a single fixed token sequence. They demonstrate that gradients
+flow correctly through the streaming machinery end to end; they are **not** useful
+finetunes on real data.
+
+### Components
+
+| module | role |
+| --- | --- |
+| `planner.py` | capacity/throughput/endurance verdicts from real checkpoints |
+| `shards.py` | flat per-block shard files and their manifest |
+| `diskpool.py` | disk -> pinned ring -> GPU staging, background readers |
+| `lora.py` | adapters over streamed frozen base weights |
+| `microbatch.py` | micro-batch looping inside one block visit, activation offload |
+| `fused_optim.py` | per-block Adam with disk-resident state |
+| `adapters.py` | per-family block assignment, expert-major MoE |
+| `gptoss.py` | MXFP4 experts dequantized one expert at a time |
+| `runners.py` | end-to-end drivers (Qwen3-VL, gpt-oss) |
+
+Blocks are built on `meta` and materialized only when a slot stages them, so a
+model far larger than RAM can be constructed. Pass a manifest to opt in:
+
+```python
+from shards import ShardManifest
+from streamer import StreamedModel
+
+manifest = ShardManifest.load("shards-qwen8b")
+model = StreamedModel(meta_blocks, prefetch_ahead=2, manifest=manifest)
+```
+
+### Limits
+
+Sequence length 128 was used throughout; gpt-oss's 128-token sliding-window
+attention coincides with full attention there, and longer sequences need real
+sliding-window masks passed as block kwargs, which is not implemented. The fused
+optimizer is correctness-tested against `torch.optim.Adam` at small scale only --
+the planner rejects every full-finetune target on this hardware. Qwen3-VL-MoE
+stores experts fused in one tensor per layer, so it needs expert-dimension
+slicing (`adapters.chunk_fused_experts`) rather than name-based splitting.
+
 ## Measured crossover and memory
 
 ![Measured transfer/compute crossover and peak CUDA allocation](https://raw.githubusercontent.com/hareramray/BlockStreamer/main/results/roofline.png)
