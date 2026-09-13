@@ -28,7 +28,19 @@ dev = ["pytest>=8", "ruff>=0.9", "matplotlib>=3.8"]
 
 [tool.setuptools]
 packages = ["block_streamer"]
-py-modules = ["streamer", "memory_pool"]
+py-modules = [
+    "streamer",
+    "memory_pool",
+    "shards",
+    "diskpool",
+    "planner",
+    "lora",
+    "microbatch",
+    "fused_optim",
+    "adapters",
+    "gptoss",
+    "runners",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

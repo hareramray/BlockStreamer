@@ -197,8 +197,20 @@ class _StreamAutograd(torch.autograd.Function):
                 model.gradient_transfer_bytes += tensor_bytes(gradient)
                 cpu_contributions.append((master_indices[id(parameter)], cpu))
 
+        # Blocks below the lowest trainable parameter cannot contribute a
+        # gradient to anything, so descending into them would re-fetch their
+        # weights for nothing. Partial adaptation (LoRA on the top layers) only
+        # halves the backward read if the walk actually stops.
+        lowest = 0
+        if not any(ctx.input_grad_flags):
+            lowest = len(model.blocks)
+            for index in range(len(model.blocks)):
+                block = model.blocks[index]
+                if any(p.requires_grad for p in block.parameters()):
+                    lowest = index
+                    break
         model._execute(
-            list(reversed(range(len(model.blocks)))),
+            list(reversed(range(lowest, len(model.blocks)))),
             run,
             (block_inputs, input_leaves, output_grads),
             grad=True,
@@ -227,7 +239,14 @@ def training_forward(
     tree, inputs = TensorTree.split((hidden, args, kwargs))
     call = Invocation(tree, len(inputs))
     # Include buffers in saved state so registered-state changes are version checked.
-    masters = list(model.parameters()) + list(model.buffers())
+    # Disk-backed blocks keep their frozen base weights on meta: those have no
+    # storage to version-check and never receive gradients, so only materialized
+    # state (adapters, resident buffers) is saved.
+    masters = [
+        tensor
+        for tensor in list(model.parameters()) + list(model.buffers())
+        if not tensor.is_meta
+    ]
     outputs = _StreamAutograd.apply(model, call, *inputs, *masters)
     assert call.output is not None
     return call.output.merge(outputs)
