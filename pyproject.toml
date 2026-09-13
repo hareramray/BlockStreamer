@@ -4,14 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "block-streamer"
-version = "0.1.0"
-description = "Bounded, asynchronous parameter streaming for PyTorch blocks"
+version = "0.2.0"
+description = "Bounded, asynchronous parameter streaming for PyTorch blocks, with NVMe weight offload and LoRA finetuning"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["torch>=2.4"]
-keywords = ["pytorch", "cuda", "offloading", "inference", "training"]
+keywords = [
+    "pytorch",
+    "cuda",
+    "offloading",
+    "inference",
+    "training",
+    "lora",
+    "finetuning",
+    "nvme",
+    "moe",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,22 +35,16 @@ Issues = "https://github.com/hareramray/BlockStreamer/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.9", "matplotlib>=3.8"]
+# Needed only by the modules that read real Hugging Face checkpoints:
+# planner, runners, gptoss. They import these lazily, so the streaming core,
+# LoRA, and the fused optimizer work without them.
+models = ["transformers>=4.40", "safetensors>=0.4"]
 
 [tool.setuptools]
 packages = ["block_streamer"]
-py-modules = [
-    "streamer",
-    "memory_pool",
-    "shards",
-    "diskpool",
-    "planner",
-    "lora",
-    "microbatch",
-    "fused_optim",
-    "adapters",
-    "gptoss",
-    "runners",
-]
+# Only the 0.1.0 modules stay top-level; everything since lives under
+# block_streamer.* so the install claims no further global import names.
+py-modules = ["streamer", "memory_pool"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

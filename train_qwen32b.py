@@ -6,8 +6,8 @@ import warnings
 import torch
 
 warnings.filterwarnings("ignore")
-from lora import LoRAConfig, adapter_state
-from runners import Qwen3VLRunner
+from block_streamer.lora import LoRAConfig, adapter_state
+from block_streamer.runners import Qwen3VLRunner
 
 torch.manual_seed(0)
 STEPS, SEQ = 30, 128

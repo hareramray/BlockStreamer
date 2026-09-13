@@ -9,23 +9,23 @@ import torch
 from test_parity import CUDA
 from torch import nn
 
-from adapters import (
+from block_streamer.adapters import (
     BaseAdapter,
     ExpertMajorMoE,
     UniformBlock,
     chunk_fused_experts,
     describe_blocks,
 )
-from fused_optim import AdamConfig, FusedDiskAdam
-from lora import (
+from block_streamer.fused_optim import AdamConfig, FusedDiskAdam
+from block_streamer.lora import (
     LoRAConfig,
     LoRALinear,
     apply_to_blocks,
     backward_fetch_fraction,
     freeze_base,
 )
-from microbatch import MicroBatchConfig, micro_forward
-from shards import ShardManifest, convert_modules
+from block_streamer.microbatch import MicroBatchConfig, micro_forward
+from block_streamer.shards import ShardManifest, convert_modules
 from streamer import StreamedModel
 
 DIM, HIDDEN, DEPTH = 24, 32, 6
@@ -374,7 +374,7 @@ def test_mxfp4_matmul_gradient_and_memory() -> None:
     expert's 47 MiB weight alive for the whole block. Re-deriving it from the
     packed tensors is what lets a 128-expert layer back-propagate in 8 GB.
     """
-    from gptoss import dequantize_expert, mxfp4_matmul
+    from block_streamer.gptoss import dequantize_expert, mxfp4_matmul
 
     torch.manual_seed(0)
     blocks = torch.randint(0, 255, (1, 64, 4, 16), dtype=torch.uint8, device="cuda")
@@ -403,7 +403,7 @@ def test_mxfp4_matmul_gradient_and_memory() -> None:
 
 
 def test_dequantize_expert_requires_expert_dimension() -> None:
-    from gptoss import dequantize_expert
+    from block_streamer.gptoss import dequantize_expert
 
     blocks = torch.randint(0, 255, (64, 4, 16), dtype=torch.uint8)
     scales = torch.randint(120, 134, (64, 4), dtype=torch.uint8)

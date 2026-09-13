@@ -93,7 +93,7 @@ class StreamedModel(nn.Module):
                 self.residency_observer,
             )
         else:
-            from diskpool import DiskBufferPool
+            from block_streamer.diskpool import DiskBufferPool
 
             self.pool = DiskBufferPool(
                 self.device,

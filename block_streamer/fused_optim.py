@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from shards import BlockSpec, ShardManifest, TensorSpec, dtype_name, plan_block
+from .shards import BlockSpec, ShardManifest, TensorSpec, dtype_name, plan_block
 
 
 @dataclass

@@ -15,9 +15,10 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from lora import LoRAConfig, LoRALinear, apply_to_blocks, freeze_base
-from shards import ShardManifest, convert_modules
 from streamer import StreamedModel
+
+from .lora import LoRAConfig, LoRALinear, apply_to_blocks, freeze_base
+from .shards import ShardManifest, convert_modules
 
 
 @dataclass
@@ -264,7 +265,7 @@ class GptOssRunner(nn.Module):
         warnings.filterwarnings("ignore")
         from transformers import AutoConfig, AutoModelForCausalLM
 
-        from gptoss import install_mxfp4_experts
+        from .gptoss import install_mxfp4_experts
 
         self.device_ = torch.device(device)
         self.dtype = dtype

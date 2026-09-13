@@ -18,7 +18,8 @@ import torch
 from torch import Tensor, nn
 
 from memory_pool import BufferPool, Resident, tensor_bytes
-from shards import BlockSpec, ShardManifest
+
+from .shards import BlockSpec, ShardManifest
 
 
 class PinnedRing:

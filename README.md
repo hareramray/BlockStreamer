@@ -57,12 +57,12 @@ python -m pip install block-streamer
 ```
 
 `torch` is the only hard dependency. The streaming core, LoRA, and the fused
-optimizer need nothing else. `planner.py`, `runners.py`, and `gptoss.py` read real
+optimizer need nothing else. `block_streamer.planner`, `block_streamer.runners`, and `block_streamer.gptoss` read real
 Hugging Face checkpoints and additionally need `transformers` and `safetensors`;
 they import these lazily, so the rest of the package works without them:
 
 ```bash
-python -m pip install transformers safetensors
+python -m pip install "block-streamer[models]"
 ```
 
 For development, clone the repository and install from its root:
@@ -175,7 +175,7 @@ The training design makes these choices:
    Backward stops at the lowest block holding a trainable parameter, so adapting
    only the top layers halves the re-fetch rather than merely discarding the
    gradients. Saved activations are O(depth) on GPU by default;
-   `microbatch.py` offloads them to pinned host memory when depth makes that
+   `block_streamer.microbatch` offloads them to pinned host memory when depth makes that
    impossible.
 2. **Offload gradients after each block.** Compute that block's gradients on GPU,
    copy them into pinned CPU tensors on the compute stream, and make CPU reads wait
@@ -186,7 +186,7 @@ The training design makes these choices:
 3. **CPU optimizer and state, by default.** An ordinary CPU optimizer on
    `model.parameters()` runs its step on CPU and does not stream to GPU. This
    incurs host RAM for every gradient and every moment, which is what caps this
-   path near 1B parameters on a 16 GB host. `fused_optim.FusedDiskAdam` lifts
+   path near 1B parameters on a 16 GB host. `block_streamer.fused_optim.FusedDiskAdam` lifts
    that cap by consuming each block's gradients during backward; see
    [NVMe offload and LoRA finetuning](#nvme-offload-and-lora-finetuning).
    No automatic fp32 master-weight conversion or integrated loss scaling is
@@ -230,11 +230,11 @@ raise the ceiling:
 * **LoRA over a streamed, frozen base.** The base is read-only, so there is no
   optimizer state and nothing is written back. Disk holds 2 B/param and SSD
   endurance is a non-issue.
-* **A fused per-block optimizer** (`fused_optim.py`) that reads a block's moments,
+* **A fused per-block optimizer** (`block_streamer.fused_optim`) that reads a block's moments,
   updates on GPU, writes back, and discards the gradient before the next block.
   Host memory then holds one block rather than the model. It writes 12 B/param
   every step, which exhausts a 300 TBW consumer SSD in a few hundred steps for
-  any model above ~8B, so `planner.py` gates it behind an explicit check.
+  any model above ~8B, so `block_streamer.planner` gates it behind an explicit check.
 
 Per-parameter cost and the resulting ceiling, for bf16 compute with Adam on a
 16 GB host and ~330 GB of free disk:
@@ -250,11 +250,11 @@ Per-parameter cost and the resulting ceiling, for bf16 compute with Adam on a
 The last row is why LoRA is the default. Writing nothing per step removes both the
 endurance limit and two thirds of the per-step traffic.
 
-Start with `planner.py`, which reads a checkpoint's real safetensors headers and
+Start with `block_streamer.planner`, which reads a checkpoint's real safetensors headers and
 reports capacity, throughput, and endurance before anything is downloaded:
 
 ```bash
-python planner.py --models gpt-oss-120b Qwen3-VL-32B
+python -m block_streamer.planner --models gpt-oss-120b Qwen3-VL-32B
 ```
 
 It computes sizes from tensor shapes, never from an index's `metadata.total_size`
@@ -269,8 +269,8 @@ rated write endurance is exhausted.
 
 ```python
 import torch
-from lora import LoRAConfig
-from runners import Qwen3VLRunner
+from block_streamer.lora import LoRAConfig
+from block_streamer.runners import Qwen3VLRunner
 
 # Converts the checkpoint to per-block shards on first use, then streams them.
 runner = Qwen3VLRunner(
@@ -320,7 +320,7 @@ effects are mixed into that spread and three measurements cannot separate them:
 page cache (12.9 GiB partly fits in 15.7 GB of RAM, 58 GiB does not),
 per-block overhead (Qwen3-VL-32B makes 96 block visits per step against
 gpt-oss's 54, so its smaller blocks cost more per byte), and MXFP4 dequantization
-compute in gpt-oss. `planner.py` therefore assumes a flat, deliberately
+compute in gpt-oss. `block_streamer.planner` therefore assumes a flat, deliberately
 conservative 1.0 GB/s rather than fitting a curve to three points; it predicts
 21/94/94 s against the 14.2/82.3/94.1 measured, erring toward over-estimating.
 
@@ -343,22 +343,21 @@ are bit-identical to the dense path.
 
 | module | role |
 | --- | --- |
-| `planner.py` | capacity/throughput/endurance verdicts from real checkpoints |
-| `shards.py` | flat per-block shard files and their manifest |
-| `diskpool.py` | disk -> pinned ring -> GPU staging, background readers |
-| `lora.py` | adapters over streamed frozen base weights |
-| `microbatch.py` | micro-batch looping inside one block visit, activation offload |
-| `fused_optim.py` | per-block Adam with disk-resident state |
-| `adapters.py` | per-family block assignment, expert-major MoE |
-| `gptoss.py` | MXFP4 experts dequantized one expert at a time |
-| `runners.py` | end-to-end drivers (Qwen3-VL, gpt-oss) |
+| `block_streamer.planner` | capacity/throughput/endurance verdicts from real checkpoints |
+| `block_streamer.shards` | flat per-block shard files and their manifest |
+| `block_streamer.diskpool` | disk -> pinned ring -> GPU staging, background readers |
+| `block_streamer.lora` | adapters over streamed frozen base weights |
+| `block_streamer.microbatch` | micro-batch looping inside one block visit, activation offload |
+| `block_streamer.fused_optim` | per-block Adam with disk-resident state |
+| `block_streamer.adapters` | per-family block assignment, expert-major MoE |
+| `block_streamer.gptoss` | MXFP4 experts dequantized one expert at a time |
+| `block_streamer.runners` | end-to-end drivers (Qwen3-VL, gpt-oss) |
 
 Blocks are built on `meta` and materialized only when a slot stages them, so a
 model far larger than RAM can be constructed. Pass a manifest to opt in:
 
 ```python
-from shards import ShardManifest
-from streamer import StreamedModel
+from block_streamer import ShardManifest, StreamedModel
 
 manifest = ShardManifest.load("shards-qwen8b")
 model = StreamedModel(meta_blocks, prefetch_ahead=2, manifest=manifest)
@@ -380,13 +379,13 @@ is unexercised despite two of the three models being VLMs.
 The fused optimizer is correctness-tested against `torch.optim.Adam` at small
 scale only, because the planner rejects every full-finetune target on this
 hardware on endurance grounds. Micro-batch looping and activation offload
-(`microbatch.py`) are tested for gradient equivalence and byte-identical reads but
+(`block_streamer.microbatch`) are tested for gradient equivalence and byte-identical reads but
 were not used in the runs above, which are batch 1.
 
-Only Qwen3-VL and gpt-oss have runners. `adapters.py` carries a GLM-4.x adapter
+Only Qwen3-VL and gpt-oss have runners. `block_streamer.adapters` carries a GLM-4.x adapter
 validated against a real manifest for block assignment and sizing, but no GLM
 model was downloaded or run. Qwen3-VL-MoE stores experts fused in one tensor per
-layer, so it needs expert-dimension slicing (`adapters.chunk_fused_experts`)
+layer, so it needs expert-dimension slicing (`block_streamer.adapters.chunk_fused_experts`)
 rather than name-based splitting; that slicing is unit-tested but never exercised
 against a real MoE checkpoint, since Qwen3-VL-235B needs 439 GiB and does not fit.
 
